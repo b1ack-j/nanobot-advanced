@@ -53,3 +53,8 @@ def get_bridge_install_dir() -> Path:
 def get_legacy_sessions_dir() -> Path:
     """Return the legacy global session directory used for migration fallback."""
     return Path.home() / ".nanobot" / "sessions"
+
+
+def get_control_events_dir() -> Path:
+    """Return the control-plane event log directory (append-only events)."""
+    return get_runtime_subdir("control-events")

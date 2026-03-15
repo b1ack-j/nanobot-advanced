@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -28,6 +28,7 @@ class ChannelManager:
         self.bus = bus
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
+        self._pause_check: Callable[[str], bool] | None = None  # Optional; set by control plane to skip paused channels
 
         self._init_channels()
 
@@ -222,6 +223,8 @@ class ChannelManager:
                     if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
                         continue
 
+                if self._pause_check and self._pause_check(msg.channel):
+                    continue
                 channel = self.channels.get(msg.channel)
                 if channel:
                     try:

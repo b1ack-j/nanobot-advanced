@@ -20,6 +20,7 @@
 
 ## 📢 News
 
+- **2026-03-10** 📊 **Dashboard & Control Plane** — Gateway now includes an optional web dashboard: session list/detail, channel health, agent status, trajectory timeline, and in-dashboard chat. Build with `cd dashboard && npm install && npm run build`, then run `nanobot gateway` and open http://localhost:18790. See [Dashboard & Control Plane](#-dashboard--control-plane) below.
 - **2026-03-08** 🚀 Released **v0.1.4.post4** — a reliability-packed release with safer defaults, better multi-instance support, sturdier MCP, and major channel and provider improvements. Please see [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.4.post4) for details.
 - **2026-03-07** 🚀 Azure OpenAI provider, WhatsApp media, QQ group chats, and more Telegram/Feishu polish.
 - **2026-03-06** 🪄 Lighter providers, smarter media handling, and sturdier memory and CLI compatibility.
@@ -72,6 +73,8 @@
 
 💎 **Easy-to-Use**: One-click to deploy and you're ready to go.
 
+📊 **Dashboard (optional)**: When running the gateway, a web dashboard gives you session list, channel health, agent status, trajectory timeline, and in-dashboard chat — similar to OpenClaw. Build once from the `dashboard/` directory, then open http://localhost:18790.
+
 ## 🏗️ Architecture
 
 <p align="center">
@@ -110,6 +113,8 @@ git clone https://github.com/HKUDS/nanobot.git
 cd nanobot
 pip install -e .
 ```
+
+> From source you also get the **dashboard** and **control plane**: after install, build the UI with `cd dashboard && npm install && npm run build && cd ..` so the gateway can serve it at http://localhost:18790 when you run `nanobot gateway`. See [Dashboard & Control Plane](#-dashboard--control-plane).
 
 **Install with [uv](https://github.com/astral-sh/uv)** (stable, fast)
 
@@ -192,6 +197,42 @@ nanobot agent
 ```
 
 That's it! You have a working AI assistant in 2 minutes.
+
+## 📊 Dashboard & Control Plane
+
+When running the **gateway** (`nanobot gateway`), you can use the optional **web dashboard** to monitor and control sessions, channels, and agents — similar to OpenClaw’s control experience.
+
+**What the dashboard provides:**
+
+| Area | Features |
+|------|----------|
+| **Chat** | In-dashboard chat: pick a session, see message history, send messages. Your messages appear immediately (optimistic UI); agent status shows “thinking” / “Calling tool: …” until the reply arrives. |
+| **Control** | Overview (stats, queue depth, channel health), Channels (pause/resume), Sessions (list/detail), Usage. |
+| **Trajectory** | Per-session timeline of turns and tool calls (invoked/completed) with optional filtering. |
+| **Agent** | Agents (runtime status, model, queue depth), Skills, Nodes. |
+| **Settings** | Config viewer (secrets redacted), Debug, Logs. |
+
+**How to run the dashboard:**
+
+1. **Build the dashboard** (once, from the repo root; requires Node.js):
+
+   ```bash
+   cd dashboard && npm install && npm run build && cd ..
+   ```
+
+2. **Start the gateway** (from the repo root so it can serve `dashboard/dist`):
+
+   ```bash
+   nanobot gateway
+   ```
+
+3. **Open in browser:** [http://localhost:18790](http://localhost:18790) (or the port set in config).
+
+The gateway serves the control API at `/api/control/*` and WebSocket at `/ws/control`; if `dashboard/dist` exists, the same port serves the dashboard at `/`. No dashboard build is required for CLI or channel-only use.
+
+**Optional:** Set `NANOBOT_CONTROL_API_TOKEN` to require `X-API-Token` on API/WS requests; if unset, no auth is enforced (suitable for localhost/single-operator).
+
+For architecture, API contracts, and runbook, see **docs/nanobot-dashboard-gateway/** and **docs/USAGE.md**.
 
 ## 💬 Chat Apps
 
@@ -1045,7 +1086,7 @@ nanobot gateway --config ~/.nanobot-telegram/config.json --workspace /tmp/nanobo
 | `nanobot agent` | Interactive chat mode |
 | `nanobot agent --no-markdown` | Show plain-text replies |
 | `nanobot agent --logs` | Show runtime logs during chat |
-| `nanobot gateway` | Start the gateway |
+| `nanobot gateway` | Start the gateway (dashboard at http://localhost:18790 if `dashboard/dist` exists) |
 | `nanobot status` | Show status |
 | `nanobot provider login openai-codex` | OAuth login for providers |
 | `nanobot channels login` | Link WhatsApp (scan QR) |
@@ -1176,6 +1217,13 @@ nanobot/
 │   ├── skills.py   #    Skills loader
 │   ├── subagent.py #    Background task execution
 │   └── tools/      #    Built-in tools (incl. spawn)
+├── controlplane/   # 📊 Dashboard & control API (gateway only)
+│   ├── api/        #    FastAPI app, REST + WebSocket
+│   ├── eventlog.py #    Append-only event log
+│   ├── projection.py #  In-memory index for sessions/trajectory
+│   ├── service.py  #    Control plane orchestration
+│   ├── runtime_facade.py # Bridge to agent/channels/session
+│   └── safety.py   #    Safety-gated control actions
 ├── skills/         # 🎯 Bundled skills (github, weather, tmux...)
 ├── channels/       # 📱 Chat channel integrations
 ├── bus/            # 🚌 Message routing
@@ -1185,6 +1233,12 @@ nanobot/
 ├── session/        # 💬 Conversation sessions
 ├── config/         # ⚙️ Configuration
 └── cli/            # 🖥️ Commands
+
+dashboard/          # 🌐 Web dashboard (React + TypeScript, Vite)
+├── src/            #    App, layout, chat, control, trajectory, settings
+└── dist/           #    Built static bundle (served by gateway when present)
+
+docs/               # 📄 Usage, architecture, survey, nanobot-dashboard-gateway/
 ```
 
 ## 🤝 Contribute & Roadmap

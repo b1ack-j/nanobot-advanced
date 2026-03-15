@@ -448,7 +448,84 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
+    # Control plane (dashboard API + WebSocket)
+    from nanobot.controlplane.api import create_control_app
+    from nanobot.controlplane.eventlog import ControlEventLog
+    from nanobot.controlplane.projection import ProjectionIndex
+    from nanobot.controlplane.runtime_facade import RuntimeFacade
+    from nanobot.controlplane.service import ControlPlaneService
+
+    facade = RuntimeFacade(
+        session_manager=session_manager,
+        channel_manager=channels,
+        agent_loop=agent,
+        bus=bus,
+    )
+    channels._pause_check = facade.is_channel_paused
+    control_service = ControlPlaneService(
+        facade=facade,
+        workspace=config.workspace_path,
+    )
+    control_service.set_workspace(config.workspace_path)
+    from pathlib import Path as P
+    _dashboard_dist = P(__file__).resolve().parent.parent.parent / "dashboard" / "dist"
+
+    main_loop_ref = [None]
+
+    def _submit_operator_message(channel: str, chat_id: str, content: str) -> None:
+        from nanobot.bus.events import InboundMessage
+        loop = main_loop_ref[0]
+        if not loop or not loop.is_running():
+            return
+        async def _do() -> None:
+            await bus.publish_inbound(
+                InboundMessage(channel=channel, sender_id="operator", chat_id=chat_id, content=content)
+            )
+        asyncio.run_coroutine_threadsafe(_do(), loop)
+
+    control_app = create_control_app(
+        control_service,
+        static_dir=_dashboard_dist if _dashboard_dist.is_dir() else None,
+        submit_operator_message=_submit_operator_message,
+        config_snapshot=config.model_dump(by_alias=True),
+    )
+    if os.environ.get("NANOBOT_CONTROL_API_TOKEN"):
+        control_service.set_safety_token(os.environ["NANOBOT_CONTROL_API_TOKEN"])
+
+    def _control_plane_emit(event: str, data: dict) -> None:
+        if event == "session.updated":
+            control_service.emit_session_updated(
+                session_id=data.get("session_id", ""),
+                channel=data.get("channel", ""),
+                chat_id=data.get("chat_id", ""),
+                status=data.get("status", "active"),
+                last_activity_at=data.get("last_activity_at"),
+                turn_count=data.get("turn_count", 0),
+            )
+        elif event == "trajectory.step":
+            control_service.emit_trajectory_step(
+                session_id=data.get("session_id", ""),
+                step_type=data.get("step_type", "turn.started"),
+                actor=data.get("actor", "assistant"),
+                payload=data.get("payload", {}),
+            )
+    agent._control_plane_emitter = _control_plane_emit
+
+    import threading
+    import uvicorn
+    def run_control_api():
+        uvicorn.run(
+            control_app,
+            host=config.gateway.host,
+            port=port,
+            log_level="info",
+        )
+    api_thread = threading.Thread(target=run_control_api, daemon=True)
+    api_thread.start()
+    console.print(f"[green]✓[/green] Control API: http://{config.gateway.host}:{port}/api/control  WS: /ws/control")
+
     async def run():
+        main_loop_ref[0] = asyncio.get_running_loop()
         try:
             await cron.start()
             await heartbeat.start()

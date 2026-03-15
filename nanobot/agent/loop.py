@@ -65,9 +65,11 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        control_plane_emitter: Callable[[str, dict[str, Any]], None] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
+        self._control_plane_emitter = control_plane_emitter
         self.channels_config = channels_config
         self.provider = provider
         self.workspace = workspace
@@ -152,6 +154,22 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
+    def _emit_session_updated(
+        self, session: Session, channel: str, chat_id: str
+    ) -> None:
+        """Emit session.updated to control plane if emitter is set."""
+        if not self._control_plane_emitter:
+            return
+        from datetime import datetime
+        self._control_plane_emitter("session.updated", {
+            "session_id": session.key,
+            "channel": channel,
+            "chat_id": chat_id,
+            "status": "active",
+            "last_activity_at": session.updated_at,
+            "turn_count": len([m for m in session.messages if m.get("role") in ("user", "assistant")]) // 2,
+        })
+
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""
         for name in ("message", "spawn", "cron"):
@@ -181,12 +199,15 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        session_key: str = "",
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        if self._control_plane_emitter and session_key:
+            self._control_plane_emitter("trajectory.step", {"session_id": session_key, "step_type": "turn.started", "actor": "assistant"})
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -226,9 +247,23 @@ class AgentLoop:
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
+                    if self._control_plane_emitter and session_key:
+                        self._control_plane_emitter("trajectory.step", {
+                            "session_id": session_key,
+                            "step_type": "tool.invoked",
+                            "actor": "assistant",
+                            "payload": {"name": tool_call.name, "arguments": tool_call.arguments},
+                        })
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if self._control_plane_emitter and session_key:
+                        self._control_plane_emitter("trajectory.step", {
+                            "session_id": session_key,
+                            "step_type": "tool.completed",
+                            "actor": "assistant",
+                            "payload": {"name": tool_call.name, "result_preview": str(result)[:200]},
+                        })
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -245,6 +280,8 @@ class AgentLoop:
                     thinking_blocks=response.thinking_blocks,
                 )
                 final_content = clean
+                if self._control_plane_emitter and session_key:
+                    self._control_plane_emitter("trajectory.step", {"session_id": session_key, "step_type": "turn.completed", "actor": "assistant"})
                 break
 
         if final_content is None and iteration >= self.max_iterations:
@@ -253,6 +290,8 @@ class AgentLoop:
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
                 "without completing the task. You can try breaking the task into smaller steps."
             )
+            if self._control_plane_emitter and session_key:
+                self._control_plane_emitter("trajectory.step", {"session_id": session_key, "step_type": "turn.completed", "actor": "assistant"})
 
         return final_content, tools_used, messages
 
@@ -341,13 +380,14 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
+            self._emit_session_updated(session, channel, chat_id)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            final_content, _, all_msgs = await self._run_agent_loop(messages, session_key=key)
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
@@ -358,6 +398,7 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+        self._emit_session_updated(session, msg.channel, msg.chat_id)
 
         # Slash commands
         cmd = msg.content.strip().lower()
@@ -433,7 +474,7 @@ class AgentLoop:
             ))
 
         final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+            initial_messages, on_progress=on_progress or _bus_progress, session_key=key,
         )
 
         if final_content is None:
